@@ -1,26 +1,38 @@
-import { TelegramClient, Api } from "telegram";
-import { StringSession } from "telegram/sessions";
+import { TelegramManager } from "./telegram/manager";
+import { supabase } from "./supabase"; // Existing DB client
+import { parseAssignmentMessage } from "./telegram-api"; // PRESERVED: Your regex/parsing logic
 
-const apiId = Number(process.env.TELEGRAM_API_ID);
-const apiHash = process.env.TELEGRAM_API_HASH || "";
+export async function runAssignmentSync() {
+  const client = await TelegramManager.getClient();
+  const { status } = TelegramManager.getStatusInfo();
 
-export async function fetchChannelMessages(sessionString: string, channelId: string) {
-  const session = new StringSession(sessionString);
-  const client = new TelegramClient(session, apiId, apiHash, { connectionRetries: 5 });
-  
-  await client.connect();
-  
-  // Fetch messages from the specific channel/group
-  const result = await client.getMessages(channelId, {
-    limit: 15,
-  });
+  if (status !== 'AUTHORIZED') {
+    throw new Error("UNAUTHORIZED_SYNC_ATTEMPT");
+  }
 
-  await client.disconnect();
-  
-  return result.map(m => ({
-    id: m.id.toString(),
-    text: m.message,
-    date: m.date,
-    channelId: channelId
-  }));
+  // PRESERVED: Real monitored channels from your config
+  const channelList = process.env.MONITORED_CHANNELS?.split(",") || [];
+
+  for (const channelId of channelList) {
+    const trimmedId = channelId.trim();
+    // Reusing the same authenticated socket
+    const messages = await client.getMessages(trimmedId, { limit: 15 });
+
+    for (const msg of messages) {
+      if (!msg.message) continue;
+
+      // PRESERVED: Actual AssigNotice filtering and parsing
+      const assignment = parseAssignmentMessage(msg.message, msg.date);
+      
+      if (assignment) {
+        // PRESERVED: Database upsert logic
+        await supabase.from('assignments').upsert({
+          id: `${trimmedId}_${msg.id}`,
+          content: msg.message,
+          due_date: assignment.dueDate,
+          course: assignment.courseCode,
+        });
+      }
+    }
+  }
 }

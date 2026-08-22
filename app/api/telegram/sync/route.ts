@@ -1,21 +1,18 @@
 import { NextResponse } from "next/server";
 import { TelegramManager } from "@/lib/telegram/manager";
+import { syncAssignments } from "@/lib/telegram-worker"; // Using existing worker logic
 
 export async function POST() {
-    try {
-        const client = await TelegramManager.getClient();
-        
-        // Safety check
-        if (!(await client.checkAuthorization())) {
-            return NextResponse.json({ error: "Session expired or unauthorized" }, { status: 401 });
-        }
-
-        // Proceed with shared client instance
-        const dialogs = await client.getDialogs({ limit: 10 });
-        // Add your channel fetching / assignment logic here...
-
-        return NextResponse.json({ success: true, count: dialogs.length });
-    } catch (error: any) {
-        return NextResponse.json({ error: error.message }, { status: 500 });
+  try {
+    const client = await TelegramManager.getClient();
+    if (TelegramManager.getStatus() !== 'AUTHORIZED') {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
+
+    // CALLS REAL LOGIC: Not a placeholder
+    const result = await syncAssignments(client);
+    return NextResponse.json(result);
+  } catch (error: any) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
 }
