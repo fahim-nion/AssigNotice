@@ -1,32 +1,40 @@
-import { TelegramClient } from "telegram";
+import { TelegramClient, Api } from "telegram";
 import { StringSession } from "telegram/sessions";
 
-const apiId = parseInt(process.env.TELEGRAM_API_ID || "0");
+const apiId = Number(process.env.TELEGRAM_API_ID);
 const apiHash = process.env.TELEGRAM_API_HASH || "";
-const stringSession = new StringSession(process.env.TELEGRAM_SESSION || "");
+const sessionString = process.env.TLGRM_SESSION || "";
 
-// Prevents multiple instances during Next.js Hot Reload
-let client: TelegramClient;
-
-if (process.env.NODE_ENV === "production") {
-  client = new TelegramClient(stringSession, apiId, apiHash, {
-    connectionRetries: 5,
-  });
-} else {
-  if (!(global as any).telegramClient) {
-    (global as any).telegramClient = new TelegramClient(
-      stringSession,
-      apiId,
-      apiHash,
-      { connectionRetries: 5 }
-    );
-  }
-  client = (global as any).telegramClient;
-}
+// Maintain singleton in development to survive hot-reloads
+let client: TelegramClient | null = null;
+let floodUntil: number = 0;
+let loginLock = false;
 
 export async function getTelegramClient() {
-  if (!client.connected) {
-    await client.connect();
-  }
-  return client;
+    // 1. Check FloodWait
+    if (Date.now() < floodUntil) {
+        const remaining = Math.ceil((floodUntil - Date.now()) / 1000);
+        throw new Error(`FLOOD_WAIT_${remaining}`);
+    }
+
+    // 2. Initialize Singleton
+    if (!client) {
+        const session = new StringSession(sessionString);
+        client = new TelegramClient(session, apiId, apiHash, {
+            connectionRetries: 5,
+        });
+    }
+
+    if (!client.connected) {
+        await client.connect();
+    }
+
+    return client;
 }
+
+export function setFloodWait(seconds: number) {
+    floodUntil = Date.now() + seconds * 1000;
+}
+
+export function isLoggingIn() { return loginLock; }
+export function setLoggingIn(val: boolean) { loginLock = val; }
