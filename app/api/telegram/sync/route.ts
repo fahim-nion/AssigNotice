@@ -1,18 +1,29 @@
 import { NextResponse } from "next/server";
-import { TelegramManager } from "@/lib/telegram/manager";
-import { syncAssignments } from "@/lib/telegram-worker"; // Using existing worker logic
+import { telegramManager } from "@/lib/telegram/manager";
+import { getAvailableChats, syncAssignments } from "@/lib/telegram-worker";
 
-export async function POST() {
+export async function GET() {
   try {
-    const client = await TelegramManager.getClient();
-    if (TelegramManager.getStatus() !== 'AUTHORIZED') {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    // CALLS REAL LOGIC: Not a placeholder
-    const result = await syncAssignments(client);
-    return NextResponse.json(result);
+    console.log("[API] GET /sync - Fetching chats...");
+    const chats = await getAvailableChats();
+    return NextResponse.json({ chats });
   } catch (error: any) {
+    console.error("[API Error] GET /sync:", error.message);
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+}
+
+export async function POST(req: Request) {
+  try {
+    const body = await req.json();
+    const groupIds = body.groupIds || [];
+    
+    console.log(`[API] POST /sync - Scanning ${groupIds.length} groups`);
+    const tasks = await syncAssignments(groupIds);
+    
+    return NextResponse.json({ success: true, count: tasks.length });
+  } catch (error: any) {
+    console.error("[API Error] POST /sync:", error.message);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }

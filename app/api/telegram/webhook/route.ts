@@ -1,39 +1,21 @@
-import { NextResponse } from 'next/server';
-import { parseTelegramMessage } from '@/lib/telegram-parser';
-import { supabase } from '@/lib/supabase';
+import { parseTelegramMessage } from "@/lib/telegram-api";
+import { NextResponse } from "next/server";
 
-export async function POST(request: Request) {
+export async function POST(req: Request) {
   try {
-    const body = await request.json();
+    const body = await req.json();
     
-    // Validate Telegram Webhook Secret (Recommended for production)
-    // const token = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
-
-    const message = body.message || body.channel_post;
-    if (!message || !message.text) {
-      return NextResponse.json({ status: 'ignored' });
+    // Process the incoming update
+    const update = parseTelegramMessage(body);
+    
+    if (update) {
+      console.log("[Webhook] Received relevant update:", update.courseCode);
+      // ... your logic to handle new assignments via webhook ...
     }
 
-    const { title, deadline, priority, description } = parseTelegramMessage(message.text);
-
-    const { data, error } = await supabase
-      .from('tasks')
-      .insert([{
-        title,
-        deadline,
-        priority,
-        description,
-        source_channel_name: message.chat.title || "Telegram",
-        source_channel_id: message.chat.id.toString(),
-        status: 'pending'
-      }])
-      .select();
-
-    if (error) throw error;
-
-    return NextResponse.json({ status: 'success', task: data[0] });
+    return NextResponse.json({ success: true });
   } catch (error: any) {
-    console.error('Webhook Error:', error.message);
-    return NextResponse.json({ status: 'error', message: error.message }, { status: 500 });
+    console.error("[Webhook] Error:", error.message);
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }

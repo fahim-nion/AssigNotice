@@ -3,157 +3,122 @@ import { StringSession } from "telegram/sessions";
 
 const apiId = Number(process.env.TELEGRAM_API_ID);
 const apiHash = process.env.TELEGRAM_API_HASH || "";
-const initialSession = process.env.TLGRM_SESSION || "";
+const initialSessionString = process.env.TELEGRAM_SESSION || "";
 
-export type AuthState = 'IDLE' | 'CODE_SENT' | 'WAITING_FOR_2FA' | 'AUTHORIZED' | 'FLOOD_WAIT';
+export type TelegramStatus = "IDLE" | "CODE_SENT" | "WAITING_FOR_2FA" | "AUTHORIZED" | "FLOOD_WAIT";
 
 interface InternalState {
   client: TelegramClient | null;
-  status: AuthState;
-  phoneNumber?: string;
+  status: TelegramStatus;
   phoneCodeHash?: string;
+  phoneNumber?: string;
+  phoneCode?: string;
   floodUntil: number;
-  isProcessing: boolean; // MUTEX LOCK
+  isProcessing: boolean;
+  isConnecting: boolean; 
 }
 
-const globalState = globalThis as unknown as { _tgState: InternalState };
-if (!globalState._tgState) {
-  globalState._tgState = { 
+const globalForTelegram = globalThis as unknown as { _tgState: InternalState };
+if (!globalForTelegram._tgState) {
+  globalForTelegram._tgState = { 
     client: null, 
-    status: 'IDLE', 
+    status: "IDLE", 
     floodUntil: 0,
-    isProcessing: false 
+    isProcessing: false,
+    isConnecting: false
   };
 }
-const state = globalState._tgState;
+const state = globalForTelegram._tgState;
 
-export class TelegramManager {
-  /**
-   * LAZY SINGLETON CLIENT
-   * Connects only when needed. Reuses connection.
-   */
-  static async getClient(): Promise<TelegramClient> {
-    if (Date.now() < state.floodUntil) {
-      const remaining = Math.ceil((state.floodUntil - Date.now()) / 1000);
-      throw new Error(`FLOOD_WAIT_${remaining}`);
-    }
+class TelegramManager {
+  public async getClient(): Promise<TelegramClient> {
+    if (Date.now() < state.floodUntil) throw new Error(`FLOOD_WAIT`);
 
     if (!state.client) {
-      // EXACT NAME: TLGRM_SESSION
-      const session = new StringSession(initialSession);
-      state.client = new TelegramClient(session, apiId, apiHash, {
+      state.client = new TelegramClient(new StringSession(initialSessionString), apiId, apiHash, {
         connectionRetries: 5,
+        timeout: 10000,
       });
     }
 
     if (!state.client.connected) {
-      await state.client.connect();
+      if (state.isConnecting) {
+        await new Promise(r => setTimeout(r, 2000));
+      } else {
+        state.isConnecting = true;
+        try {
+          console.log("[Manager] Connecting...");
+          await state.client.connect();
+        } finally {
+          state.isConnecting = false;
+        }
+      }
     }
 
-    // AUTH GUARD: Case C (Existing session)
-    if (initialSession && state.status !== 'AUTHORIZED') {
-      const authorized = await state.client.checkAuthorization();
-      if (authorized) state.status = 'AUTHORIZED';
+    // Auth Validation
+    if (state.status !== "AUTHORIZED") {
+      if (initialSessionString) {
+        const isAuth = await state.client.checkAuthorization();
+        if (isAuth) state.status = "AUTHORIZED";
+        else state.status = "IDLE";
+      } else {
+        state.status = "IDLE";
+      }
     }
 
     return state.client;
   }
 
-  static getStatusInfo() {
-    if (Date.now() < state.floodUntil) {
-      return { status: 'FLOOD_WAIT', wait: Math.ceil((state.floodUntil - Date.now()) / 1000) };
-    }
-    return { status: state.status, wait: 0 };
+  public getStatusInfo() {
+    return { status: state.status, isConnecting: state.isConnecting };
   }
 
-  // --- ATOMIC AUTH TRANSITIONS ---
+  public logout() {
+    console.log("[Manager] Resetting global state...");
+    state.status = "IDLE";
+    state.phoneNumber = undefined;
+    state.phoneCode = undefined;
+    state.phoneCodeHash = undefined;
+    // We don't destroy the client, just reset the auth status
+  }
 
-  static async sendCode(phone: string) {
-    if (state.isProcessing) throw new Error("BUSY");
-    if (state.status === 'AUTHORIZED') return;
-    if (state.status === 'CODE_SENT') return;
-
-    state.isProcessing = true;
+  public async sendCode(phone: string) {
+    const client = await this.getClient();
     try {
-      const client = await this.getClient();
+      state.isProcessing = true;
       const result = await client.sendCode({ apiId, apiHash }, phone);
       state.phoneNumber = phone;
       state.phoneCodeHash = result.phoneCodeHash;
-      state.status = 'CODE_SENT';
-    } catch (err: any) {
-      this.handleError(err);
-    } finally {
-      state.isProcessing = false;
-    }
+      state.status = "CODE_SENT";
+    } finally { state.isProcessing = false; }
   }
 
-  static async verifyCode(code: string) {
-    if (state.isProcessing) throw new Error("BUSY");
-    if (state.status !== 'CODE_SENT') throw new Error("INVALID_STATE: SEND_CODE_FIRST");
-
-    state.isProcessing = true;
+  public async verifyCode(code: string) {
+    const client = await this.getClient();
     try {
-      const client = await this.getClient();
-      await client.signIn({
+      state.isProcessing = true;
+      state.phoneCode = code;
+      await client.invoke(new Api.auth.SignIn({
         phoneNumber: state.phoneNumber!,
         phoneCodeHash: state.phoneCodeHash!,
         phoneCode: code,
-        onError: (err) => { throw err; }
-      });
-      await this.finalizeAuth();
+      }));
+      await this.finalize();
     } catch (err: any) {
-      if (err.errorMessage === "SESSION_PASSWORD_NEEDED") {
-        state.status = 'WAITING_FOR_2FA';
-      } else {
-        this.handleError(err);
-      }
-    } finally {
-      state.isProcessing = false;
-    }
+      if (err.errorMessage === "SESSION_PASSWORD_NEEDED") state.status = "WAITING_FOR_2FA";
+      else throw err;
+    } finally { state.isProcessing = false; }
   }
 
-  static async verify2FA(password: string) {
-    if (state.isProcessing) throw new Error("BUSY");
-    if (state.status !== 'WAITING_FOR_2FA') throw new Error("INVALID_STATE: 2FA_NOT_REQUIRED");
-
-    state.isProcessing = true;
-    try {
-      const client = await this.getClient();
-      await client.signIn({
-        password: async () => password,
-        onError: (err) => { throw err; }
-      });
-      await this.finalizeAuth();
-    } catch (err: any) {
-      this.handleError(err);
-    } finally {
-      state.isProcessing = false;
-    }
-  }
-
-  private static async finalizeAuth() {
+  private async finalize() {
     const client = await this.getClient();
     if (await client.checkAuthorization()) {
-      state.status = 'AUTHORIZED';
-      // BOOTSTRAP: Only print if env was initially empty
-      if (!initialSession) {
-        const session = client.session.save() as unknown as string;
-        console.log("\n=========================================");
-        console.log("TELEGRAM BOOTSTRAP SUCCESSFUL!");
-        console.log("COPY THIS INTO YOUR .env FILE:");
-        console.log(`TLGRM_SESSION="${session}"`);
-        console.log("=========================================\n");
+      state.status = "AUTHORIZED";
+      if (!initialSessionString) {
+        console.log("\n--- [BOOTSTRAP] SUCCESS ---\n" + client.session.save() + "\n--- COPY ABOVE ---\n");
       }
     }
   }
-
-  private static handleError(err: any) {
-    if (err.errorMessage?.includes("FLOOD") || err.code === 420) {
-      const seconds = err.seconds || 3600;
-      state.floodUntil = Date.now() + (seconds * 1000);
-      state.status = 'FLOOD_WAIT';
-      throw new Error(`FLOOD_WAIT_${seconds}`);
-    }
-    throw err;
-  }
 }
+
+export const telegramManager = new TelegramManager();
