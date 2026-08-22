@@ -1,21 +1,20 @@
 import { NextResponse } from "next/server";
-import { getTelegramClient } from "@/lib/telegram/client";
+import { TelegramManager } from "@/lib/telegram/manager";
 
 export async function POST() {
     try {
-        const client = await getTelegramClient();
+        const client = await TelegramManager.getClient();
         
-        // Guard: check if authorized before attempting sync
-        const isAuth = await client.checkAuthorization();
-        if (!isAuth) {
-            return NextResponse.json({ error: "Not authorized" }, { status: 401 });
+        // Safety check
+        if (!(await client.checkAuthorization())) {
+            return NextResponse.json({ error: "Session expired or unauthorized" }, { status: 401 });
         }
 
-        // Use the shared client to fetch dialogues/messages
-        const dialogs = await client.getDialogs({});
-        // ... rest of your sync logic ...
+        // Proceed with shared client instance
+        const dialogs = await client.getDialogs({ limit: 10 });
+        // Add your channel fetching / assignment logic here...
 
-        return NextResponse.json({ success: true, data: dialogs.length });
+        return NextResponse.json({ success: true, count: dialogs.length });
     } catch (error: any) {
         return NextResponse.json({ error: error.message }, { status: 500 });
     }

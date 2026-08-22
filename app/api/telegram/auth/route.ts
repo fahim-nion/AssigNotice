@@ -1,59 +1,24 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { TelegramClient } from 'telegram';
-import { StringSession } from 'telegram/sessions';
-import { errors } from 'telegram'; // Import Telegram errors
+import { NextResponse } from "next/server";
+import { TelegramManager } from "@/lib/telegram/manager";
 
-const apiId = Number(process.env.TELEGRAM_API_ID);
-const apiHash = process.env.TELEGRAM_API_HASH || '';
+export async function POST(req: Request) {
+    try {
+        const { action, phone, code, password } = await req.json();
 
-export async function POST(req: NextRequest) {
-  const { action, phone, code, phoneCodeHash, sessionString } = await req.json();
-
-  try {
-    const session = new StringSession(sessionString || "");
-    const client = new TelegramClient(session, apiId, apiHash, { 
-        connectionRetries: 5,
-        deviceModel: "AssigNotice Web App" 
-    });
-    
-    await client.connect();
-
-    if (action === 'SEND_CODE') {
-      const result = await client.sendCode({ apiId, apiHash }, phone);
-      return NextResponse.json({ phoneCodeHash: result.phoneCodeHash });
+        switch (action) {
+            case 'SEND_CODE':
+                return NextResponse.json(await TelegramManager.sendCode(phone));
+            case 'VERIFY_CODE':
+                return NextResponse.json(await TelegramManager.verifyCode(code));
+            case 'VERIFY_2FA':
+                return NextResponse.json(await TelegramManager.verify2FA(password));
+            case 'GET_STATUS':
+                return NextResponse.json({ status: TelegramManager.getStatus() });
+            default:
+                return NextResponse.json({ error: "Invalid action" }, { status: 400 });
+        }
+    } catch (error: any) {
+        const status = error.message.startsWith('FLOOD_WAIT') ? 420 : 400;
+        return NextResponse.json({ error: error.message }, { status });
     }
-
-    if (action === 'VERIFY_CODE') {
-      await client.signInUser({ apiId, apiHash }, {
-        phoneNumber: phone,
-        phoneCode: async () => code,
-        phoneCodeHash: phoneCodeHash,
-      });
-      const newSessionString = client.session.save() as unknown as string;
-      return NextResponse.json({ session: newSessionString });
-    }
-
-    if (action === 'FETCH_CHANNELS') {
-      const dialogs = await client.getDialogs({});
-      const channels = dialogs
-        .filter(d => d.isChannel || d.isGroup)
-        .map(d => ({ id: d.id?.toString(), name: d.title }));
-      return NextResponse.json({ channels });
-    }
-
-    return NextResponse.json({ error: 'Invalid Action' }, { status: 400 });
-
-  } catch (error: any) {
-    // SPECIAL HANDLING FOR FLOOD ERRORS
-    if (error instanceof errors.FloodWaitError) {
-      return NextResponse.json({ 
-        error: `Telegram limits reached. Please wait ${Math.round(error.seconds / 60)} minutes before trying again.`,
-        isFlood: true,
-        waitTime: error.seconds
-      }, { status: 420 });
-    }
-
-    console.error('Telegram Auth Error:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
 }
